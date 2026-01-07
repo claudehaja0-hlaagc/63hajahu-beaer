@@ -1,0 +1,129 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local FishingSystem = ReplicatedStorage:WaitForChild("FishingSystem")
+local FishGiver = FishingSystem:WaitForChild("FishGiver")
+
+local fishNames = {
+    "Kraken",
+    "Sotong",
+    "Sapu Sapu Goib",
+    "Shark Bone",
+    "King Crab",
+    "Naga",
+    "El Maja",
+    "El Maja Pink",
+    "Mega Hunt",
+    "Jungle Crocodile",
+    "KingJally Strong",
+    "1X1X1 Comet Shark",
+    "MEGAIJO",
+    "Blob Fish",
+    "Ikan Armor",
+    "Ikan Tulang",
+    "Worm Fish",
+    "Orca",
+    "Lochness",
+    "Magma Shark",
+    "Gingerbeard Shark",
+    "Ghost Worm Fish",
+    "Frostborn Shark",
+    "Skeleton Fish"
+}
+
+local rarities = {
+    "Common",
+    "Uncommon",
+    "Rare",
+    "Epic",
+    "Legendary",
+    "Secret"
+}
+
+local function getRandomFish()
+    return fishNames[math.random(1, #fishNames)]
+end
+
+local function getRandomWeight()
+    return math.random(800, 1000)
+end
+
+local function getRandomRarity()
+    return rarities[math.random(1, #rarities)]
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AeresHubFishingGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 300, 0, 150)
+MainFrame.Position = UDim2.new(0.5, -150, 0.5, -75)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.BackgroundTransparency = 0.1
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 10)
+UICorner.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Name = "Title"
+Title.Size = UDim2.new(1, 0, 0, 40)
+Title.Position = UDim2.new(0, 0, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Aeres Hub Fishing"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 18
+Title.Font = Enum.Font.SourceSansBold
+Title.Parent = MainFrame
+
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Size = UDim2.new(0, 200, 0, 50)
+ToggleButton.Position = UDim2.new(0.5, -100, 0.5, -25)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+ToggleButton.BorderSizePixel = 0
+ToggleButton.Text = "OFF"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 16
+ToggleButton.Font = Enum.Font.SourceSansBold
+ToggleButton.Parent = MainFrame
+
+local UICorner2 = Instance.new("UICorner")
+UICorner2.CornerRadius = UDim.new(0, 8)
+UICorner2.Parent = ToggleButton
+
+local isActive = false
+local connection
+
+ToggleButton.MouseButton1Click:Connect(function()
+    isActive = not isActive
+    if isActive then
+        ToggleButton.Text = "ON"
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+        connection = game:GetService("RunService").Heartbeat:Connect(function()
+            local args = {
+                {
+                    hookPosition = Vector3.new(-446.36358642578125, 24.149999618530273, 403.7760009765625),
+                    name = getRandomFish(),
+                    rarity = getRandomRarity(),
+                    weight = getRandomWeight()
+                }
+            }
+            FishGiver:FireServer(unpack(args))
+        end)
+    else
+        ToggleButton.Text = "OFF"
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+        if connection then
+            connection:Disconnect()
+            connection = nil
+        end
+    end
+end)
+
+local DragDetector = Instance.new("UIDragDetector")
+DragDetector.Parent = MainFrame
