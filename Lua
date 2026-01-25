@@ -1,0 +1,1979 @@
+
+-- ===========================================
+-- DUALITY HUB PREMIUM EDITION
+-- dengan Fitur Anti-AFK 15 Menit
+-- Revamped GUI by Haja Hub
+-- Improvements: Enhanced styling, added shadows, improved animations, added tooltips, better organization, added close button, improved lifetime timer
+-- ===========================================
+
+-- Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+
+-- Local references
+local player = Players.LocalPlayer
+local pgui = player:WaitForChild("PlayerGui")
+local backpack = player:WaitForChild("Backpack")
+
+-- Links
+local whitelist_url = "https://pastebin.com/raw/2aZF90xW"
+
+-- Script lifetime tracking
+local scriptStartTime = tick()
+local lifetimeRunning = true
+
+-- ===========================================
+-- PROTECTION VARIABLES
+-- ===========================================
+local ROD_CHECK_COUNTER = 0
+local MAX_ROD_CHECK_ATTEMPTS = 5
+local NO_ROD_WAIT_TIME = 10
+local lastRodCheckTime = 0
+local rodNotFoundWarningShown = false
+
+-- Anti-cheat variables
+local isFirstCycle = true
+local cycleCounter = 0
+
+-- ===========================================
+-- LOCAL SETTINGS TABLE
+-- ===========================================
+local Settings = {
+    -- Auto Farm Settings
+    autoFarm = false,
+    fishingDelay = 2.5,
+    fishingMode = "Fast",
+    
+    -- Auto Sell Settings
+    autosell = false,
+    sellValue = 600,
+    autosellDelay = 70,
+    autoworm = false,
+    
+    -- Movement Settings
+    freeze = false,
+    freezePos = nil,
+    noClip = true,
+    infOxygen = true,
+    
+    -- Shop Settings
+    potionSelect = "EXTREME_POTION",
+    potionDelay = 2.0,
+    skinSelect = "SKINCF_FAIRY_SPARK",
+    rodSelect = "PINKYS",
+    bobberSelect = "BOBBER_ROYAL",
+    autoBuyPotion = false,
+    autoBuySkin = false,
+    autoBuyRod = false,
+    autoBuyBobber = false,
+    
+    -- Other Settings
+    boostPing = false,
+    selectedZone = "Mira nusa",
+    
+    -- Worm Spot
+    wormSpot = Vector3.new(-1894, 1007, -1607),
+    prevPos = nil,
+    
+    -- Anti-AFK Settings (NEW)
+    antiAFK = true,
+    antiAFKInterval = 900, -- 15 menit = 900 detik
+    antiAFKMinimalMovement = true
+}
+
+-- ===========================================
+-- LOCAL VARIABLES
+-- ===========================================
+local modeTimer = 0
+local currentModeDelay = 2.5
+local fishingModeTask = nil
+local autoFishingTask = nil
+local toggleReferences = {}
+local isWhitelisted = false
+local lastAFKMovementTime = tick() -- NEW
+local afkMovementTask = nil -- NEW
+
+-- ===========================================
+-- WHITELIST SYSTEM FUNCTIONS
+-- ===========================================
+
+local function checkWhitelist()
+    local currentUserId = tostring(player.UserId)
+    local currentTime = os.time()
+    
+    print("[WHITELIST] Checking for UserID:", currentUserId)
+    print("[WHITELIST] Current timestamp:", currentTime)
+    
+    local success, response = pcall(function()
+        return game:HttpGet(whitelist_url, true)
+    end)
+    
+    if not success then
+        warn("[WHITELIST ERROR] Failed to fetch whitelist data:", response)
+        return false
+    end
+    
+    print("[WHITELIST] Raw data from pastebin:", response)
+    
+    local lines = {}
+    for line in response:gmatch("[^\r\n]+") do
+        table.insert(lines, line)
+    end
+    
+    for _, line in ipairs(lines) do
+        line = line:gsub("%s+", "")
+        
+        if line == "" or line:sub(1, 1) == "#" then
+            continue
+        end
+        
+        local userIdStr, timestampStr = line:match("^(%d+):(%d+)$")
+        
+        if userIdStr and timestampStr then
+            print("[WHITELIST] Found entry:", userIdStr, "timestamp:", timestampStr)
+            
+            if userIdStr == currentUserId then
+                local expiryTime = tonumber(timestampStr)
+                
+                if expiryTime then
+                    print("[WHITELIST] Match found! Expiry:", expiryTime)
+                    print("[WHITELIST] Time remaining (seconds):", expiryTime - currentTime)
+                    
+                    local expiryDate = os.date("%Y-%m-%d %H:%M:%S", expiryTime)
+                    local currentDate = os.date("%Y-%m-%d %H:%M:%S", currentTime)
+                    print("[WHITELIST] Expiry date:", expiryDate)
+                    print("[WHITELIST] Current date:", currentDate)
+                    
+                    if currentTime <= expiryTime then
+                        print("[WHITELIST] ACCESS GRANTED - Valid until:", expiryDate)
+                        return true, expiryTime
+                    else
+                        print("[WHITELIST] ACCESS DENIED - Expired on:", expiryDate)
+                        return false, expiryTime
+                    end
+                end
+            end
+        end
+    end
+    
+    print("[WHITELIST] No matching UserID found")
+    return false
+end
+
+local function createExpiryTimer(expiryTimestamp)
+    if not expiryTimestamp then return end
+    
+    local function updateTimer()
+        local currentTime = os.time()
+        local timeLeft = expiryTimestamp - currentTime
+        
+        if timeLeft <= 0 then
+            return "EXPIRED"
+        end
+        
+        local days = math.floor(timeLeft / 86400)
+        local hours = math.floor((timeLeft % 86400) / 3600)
+        local minutes = math.floor((timeLeft % 3600) / 60)
+        local seconds = math.floor(timeLeft % 60)
+        
+        if days > 0 then
+            return string.format("%dd %02dh %02dm", days, hours, minutes)
+        elseif hours > 0 then
+            return string.format("%02dh %02dm %02ds", hours, minutes, seconds)
+        else
+            return string.format("%02dm %02ds", minutes, seconds)
+        end
+    end
+    
+    return updateTimer
+end
+
+-- ===========================================
+-- ZONE DATA TABLE
+-- ===========================================
+local ZoneData = {
+    ["Mira nusa"] = {
+        charPos = Vector3.new(-248, 990, 591),
+        parkedPos = Vector3.new(-248, 990, 591)
+    },
+    ["Deep Sea 1"] = {
+        charPos = Vector3.new(1015, 990, 1633),
+        parkedPos = Vector3.new(1015, 990, 1633)
+    },
+    ["Deep Sea 2"] = {
+        charPos = Vector3.new(1194, 856, 2025),
+        parkedPos = Vector3.new(1194, 856, 2025)
+    },
+    ["Tropical Isle"] = {
+        charPos = Vector3.new(-1831, 991, -1855),
+        parkedPos = Vector3.new(-1831, 991, -1855)
+    },
+    ["Mega Zone"] = {
+        charPos = Vector3.new(-623, 990, -1728),
+        parkedPos = Vector3.new(-623, 990, -1728)
+    },
+    ["MAJITOS Zone"] = {
+        charPos = Vector3.new(2443, 990, 140),
+        parkedPos = Vector3.new(2443, 990, 140)
+    },
+    ["MAJITOS Zone 2"] = {
+        charPos = Vector3.new(2624, 874, -3),
+        parkedPos = Vector3.new(2624, 874, -3)
+    },
+    ["Kinyis Isle"] = {
+        charPos = Vector3.new(-54, 990, -1092),
+        parkedPos = Vector3.new(-54, 990, -1092)
+    },
+    ["Skyler Zone"] = {
+        charPos = Vector3.new(-1617, 990, 1552),
+        parkedPos = Vector3.new(-1471.6661376953, 992, 1773.0270996094)
+    }
+}
+
+-- ===========================================
+-- ANTI-AFK SYSTEM FUNCTIONS (15 MENIT)
+-- ===========================================
+
+local function performAFKMovement()
+    if not Settings.antiAFK or not Settings.autoFarm then
+        return
+    end
+    
+    local character = player.Character
+    if not character then return end
+    
+    local humanoid = character:FindFirstChild("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    
+    if not humanoid or not root then return end
+    
+    print("[ANTI-AFK] Performing anti-AFK movement (15 minute interval)...")
+    
+    -- Simpan posisi dan rotasi awal
+    local originalCFrame = root.CFrame
+    local originalFreezeState = Settings.freeze
+    
+    -- 1. Sementara nonaktifkan freeze
+    Settings.freeze = false
+    task.wait(0.05)
+    
+    -- 2. Gerakan minimal yang tidak terlihat
+    if Settings.antiAFKMinimalMovement then
+        -- Micro movement: naik 0.01 stud + rotasi 0.1 derajat
+        root.CFrame = originalCFrame * CFrame.new(0, 0.01, 0) * CFrame.Angles(0, math.rad(0.1), 0)
+        task.wait(0.05)
+    else
+        -- Gerakan lebih terlihat (opsional)
+        -- Lompat kecil
+        if humanoid.FloorMaterial ~= Enum.Material.Air then
+            humanoid.JumpPower = 10
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+            task.wait(0.5)
+            humanoid.JumpPower = 50
+        end
+    end
+    
+    -- 3. Kembalikan ke posisi semula
+    root.CFrame = originalCFrame
+    task.wait(0.05)
+    
+    -- 4. Aktifkan kembali freeze jika sebelumnya aktif
+    Settings.freeze = originalFreezeState
+    
+    -- 5. Update waktu terakhir gerakan
+    lastAFKMovementTime = tick()
+    
+    -- 6. Update UI jika diperlukan
+    if toggleReferences.Freeze then
+        toggleReferences.Freeze.Text = "Freeze Player: " .. (Settings.freeze and "ON" or "OFF")
+        toggleReferences.Freeze.BackgroundColor3 = Settings.freeze and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(45, 45, 60)
+        toggleReferences.Freeze.TextColor3 = Settings.freeze and Color3.new(1, 1, 1) or Color3.fromRGB(200, 200, 200)
+    end
+    
+    print("[ANTI-AFK] Movement completed. Next in " .. Settings.antiAFKInterval .. " seconds.")
+end
+
+local function startAntiAFKSystem()
+    if afkMovementTask then
+        task.cancel(afkMovementTask)
+        afkMovementTask = nil
+    end
+    
+    if not Settings.antiAFK then return end
+    
+    print("[ANTI-AFK] System started (15 minute interval)")
+    lastAFKMovementTime = tick()
+    
+    afkMovementTask = task.spawn(function()
+        while Settings.autoFarm and Settings.antiAFK do
+            local currentTime = tick()
+            local timeSinceLastMovement = currentTime - lastAFKMovementTime
+            
+            -- Cek jika sudah 15 menit (900 detik) sejak gerakan terakhir
+            if timeSinceLastMovement >= Settings.antiAFKInterval then
+                performAFKMovement()
+            end
+            
+            task.wait(1) -- Cek setiap 1 detik
+        end
+    end)
+end
+
+local function stopAntiAFKSystem()
+    if afkMovementTask then
+        task.cancel(afkMovementTask)
+        afkMovementTask = nil
+    end
+    print("[ANTI-AFK] System stopped")
+end
+
+-- ===========================================
+-- UTILITY FUNCTIONS
+-- ===========================================
+
+local function enableNoClipAndInfOxygenOnStart()
+    print("[SYSTEM] Enabling NoClip and Infinite Oxygen on script start...")
+    
+    Settings.noClip = true
+    Settings.infOxygen = true
+    
+    local character = player.Character
+    if character then
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+        print("[SYSTEM] NoClip applied to current character")
+    else
+        print("[SYSTEM] No character found, will apply when character is added")
+    end
+    
+    local oxyScript = player.PlayerScripts:FindFirstChild("OxygenSystem.client")
+    if oxyScript then 
+        oxyScript.Disabled = true
+        print("[SYSTEM] OxygenSystem disabled")
+    end
+    
+    if Lighting:FindFirstChild("UnderwaterBlur") then
+        Lighting.UnderwaterBlur:Destroy()
+        print("[SYSTEM] UnderwaterBlur removed")
+    end
+end
+
+local function startModeTimer()
+    if fishingModeTask then
+        fishingModeTask:Disconnect()
+        fishingModeTask = nil
+    end
+    
+    fishingModeTask = RunService.Heartbeat:Connect(function(deltaTime)
+        if Settings.autoFarm and Settings.fishingMode == "Fast" then
+            modeTimer = modeTimer + deltaTime
+            
+            if modeTimer >= 30 then
+                if currentModeDelay == 2.5 then
+                    currentModeDelay = 3.0
+                    Settings.fishingDelay = 3.0
+                    print("[FISHING MODE] Delay changed to 3.0 seconds")
+                else
+                    currentModeDelay = 2.5
+                    Settings.fishingDelay = 2.5
+                    print("[FISHING MODE] Delay changed to 2.5 seconds")
+                end
+                modeTimer = 0
+            end
+        end
+    end)
+end
+
+local function MakeDraggable(frame, dragButton)
+    dragButton = dragButton or frame
+    local dragging = false
+    local dragInput, dragStart, startPos
+    
+    local function update(input)
+        local delta = input.Position - dragStart
+        frame.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+    
+    dragButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    
+    dragButton.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+    
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            update(input)
+        end
+    end)
+end
+
+local function applyNoClip(character, enable)
+    if not character then return end
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = not enable
+        end
+    end
+end
+
+local function updateToggleUI()
+    if toggleReferences.NoClip then
+        toggleReferences.NoClip.Text = "NoClip: ON (Auto)"
+        toggleReferences.NoClip.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+        toggleReferences.NoClip.TextColor3 = Color3.new(1, 1, 1)
+    end
+    
+    if toggleReferences.InfOxygen then
+        toggleReferences.InfOxygen.Text = "Infinite Oxygen: ON (Auto)"
+        toggleReferences.InfOxygen.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+        toggleReferences.InfOxygen.TextColor3 = Color3.new(1, 1, 1)
+    end
+    
+    if toggleReferences.Freeze then
+        toggleReferences.Freeze.Text = "Freeze Player: " .. (Settings.freeze and "ON" or "OFF")
+        toggleReferences.Freeze.BackgroundColor3 = Settings.freeze and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(45, 45, 60)
+        toggleReferences.Freeze.TextColor3 = Settings.freeze and Color3.new(1, 1, 1) or Color3.fromRGB(200, 200, 200)
+    end
+end
+
+local function setupAutoFarm()
+    local character = player.Character
+    if not character then return end
+    
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    Settings.freeze = true
+    
+    if ZoneData[Settings.selectedZone] then
+        root.CFrame = CFrame.new(ZoneData[Settings.selectedZone].parkedPos)
+        Settings.freezePos = root.CFrame
+        print("[AUTO FARM] Teleported to " .. Settings.selectedZone .. " at position: " .. tostring(ZoneData[Settings.selectedZone].parkedPos))
+    end
+    
+    isFirstCycle = true
+    cycleCounter = 0
+    
+    if Settings.antiAFK then
+        startAntiAFKSystem()
+    end
+    
+    print("[ANTI-CHEAT] First cycle will not use remote parked")
+    
+    updateToggleUI()
+end
+
+local function disableAutoFarm()
+    local character = player.Character
+    if not character then return end
+    
+    Settings.freeze = false
+    stopAntiAFKSystem()
+    isFirstCycle = true
+    cycleCounter = 0
+    updateToggleUI()
+end
+
+-- ===========================================
+-- ROD FUNCTIONS
+-- ===========================================
+
+local function hasRodInInventory()
+    if tick() - lastRodCheckTime > 60 then
+        ROD_CHECK_COUNTER = 0
+    end
+    
+    local character = player.Character
+    if character then
+        for _, tool in ipairs(character:GetChildren()) do
+            if tool:IsA("Tool") and tool.Name:match("ROD$") then
+                ROD_CHECK_COUNTER = 0
+                rodNotFoundWarningShown = false
+                return true, tool
+            end
+        end
+    end
+    
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") and tool.Name:match("ROD$") then
+            ROD_CHECK_COUNTER = 0
+            rodNotFoundWarningShown = false
+            return true, tool
+        end
+    end
+    
+    ROD_CHECK_COUNTER = ROD_CHECK_COUNTER + 1
+    lastRodCheckTime = tick()
+    
+    if ROD_CHECK_COUNTER >= 3 and not rodNotFoundWarningShown then
+        warn("[ROD CHECK] No fishing rod found! Please equip a rod.")
+        rodNotFoundWarningShown = true
+    end
+    
+    return false, nil
+end
+
+local function getRodUUID()
+    if ROD_CHECK_COUNTER >= MAX_ROD_CHECK_ATTEMPTS then
+        warn("[ROD CHECK] Maximum rod check attempts reached. Waiting...")
+        return nil
+    end
+    
+    local hasRod, rod = hasRodInInventory()
+    
+    if not hasRod then
+        return nil
+    end
+    
+    if rod.Parent == backpack then
+        local char = player.Character
+        if char then
+            rod.Parent = char
+            task.wait(0.3)
+        end
+    end
+    
+    if rod then
+        local uuid = rod:GetAttribute("ToolUniqueId")
+        if not uuid then uuid = rod:GetAttribute("UniqueId") end
+        if not uuid then uuid = rod:GetAttribute("UUID") end
+        if not uuid then uuid = tostring(rod.Name) end
+        return tostring(uuid)
+    end
+    
+    return nil
+end
+
+-- ===========================================
+-- FISHING FUNCTIONS
+-- ===========================================
+
+local function optimizedAutoFishing()
+    print("[AUTO FARM] Starting auto fishing with anti-cheat bypass...")
+    
+    while Settings.autoFarm do
+        local localAttempts = 0
+        
+        while true do
+            local char = player.Character
+            if not char then 
+                warn("[AUTO FARM] No character found. Waiting...")
+                task.wait(2) 
+                break
+            end
+            
+            local hasRod, _ = hasRodInInventory()
+            if not hasRod then
+                if localAttempts < 3 then
+                    warn("[AUTO FARM] No rod found. Attempt", localAttempts + 1, "of 3")
+                    task.wait(2)
+                    localAttempts = localAttempts + 1
+                else
+                    warn("[AUTO FARM] No rod after 3 attempts. Waiting", NO_ROD_WAIT_TIME, "seconds...")
+                    task.wait(NO_ROD_WAIT_TIME)
+                    localAttempts = 0
+                end
+                continue
+            end
+            
+            localAttempts = 0
+            ROD_CHECK_COUNTER = 0
+            
+            local uuid = getRodUUID()
+            if not uuid then
+                warn("[AUTO FARM] Failed to get rod UUID")
+                task.wait(1)
+                break
+            end
+            
+            local parkedPosition
+            if ZoneData[Settings.selectedZone] then
+                parkedPosition = ZoneData[Settings.selectedZone].parkedPos
+            else
+                parkedPosition = char.HumanoidRootPart.Position
+            end
+            
+            local success, errorMsg = pcall(function()
+                local ParkedEvent = ReplicatedStorage:FindFirstChild("Fishing_RemoteParked")
+                
+                if not isFirstCycle then
+                    if ParkedEvent then
+                        firesignal(ParkedEvent.OnClientEvent, true, uuid, {}, parkedPosition)
+                        print("[ANTI-CHEAT] Using remote parked (Cycle", cycleCounter + 1, ")")
+                    end
+                else
+                    print("[ANTI-CHEAT] First cycle - NO remote parked used")
+                end
+                
+                local BobberEvent = ReplicatedStorage.BobberShop.ToServer.GetEquippedBobber
+                BobberEvent:InvokeServer()
+                
+                task.wait(0.01)
+                
+                local throwPower = math.random(812, 850) / 1000
+                ReplicatedStorage.Fishing_RemoteThrow:FireServer(throwPower, uuid)
+                
+                local currentDelay
+                if Settings.fishingMode == "Legit" then
+                    currentDelay = 3.5
+                else
+                    currentDelay = Settings.fishingDelay
+                end
+                
+                if isFirstCycle then
+                    currentDelay = 3.5
+                    print("[ANTI-CHEAT] First cycle delay: 3.5 seconds")
+                else
+                    print("[FISHING] Cycle", cycleCounter, "delay:", currentDelay, "seconds")
+                end
+                
+                task.wait(currentDelay)
+                
+                local insideRatios = {0.2, 0.4, 0.6, 0.8}
+                local randomInsideRatio = insideRatios[math.random(1, 4)]
+                local randomDuration = math.random(6, 8) + math.random()
+                
+                local FishingFolder = ReplicatedStorage:FindFirstChild("Fishing")
+                if FishingFolder then
+                    local ToServer = FishingFolder:FindFirstChild("ToServer")
+                    if ToServer then
+                        local ReelFinished = ToServer:FindFirstChild("ReelFinished")
+                        if ReelFinished then
+                            ReelFinished:FireServer({
+                                duration = randomDuration, 
+                                result = "SUCCESS", 
+                                insideRatio = randomInsideRatio
+                            }, uuid)
+                        end
+                    end
+                end
+                
+                if not isFirstCycle then
+                    if ParkedEvent then
+                        firesignal(ParkedEvent.OnClientEvent, false, uuid)
+                    end
+                end
+                
+                cycleCounter = cycleCounter + 1
+                
+                if isFirstCycle then
+                    isFirstCycle = false
+                    print("[ANTI-CHEAT] First cycle completed. Next cycles will use remote parked")
+                end
+                
+                task.wait(0.1)
+            end)
+            
+            if not success then
+                warn("[AUTO FARM] Error during fishing cycle:", errorMsg)
+                task.wait(1)
+            end
+            
+            break
+        end
+        
+        task.wait(0.1)
+    end
+    
+    print("[AUTO FARM] Auto fishing stopped")
+end
+
+local function startAutoSell()
+    print("[AUTO SELL] Starting auto sell...")
+    
+    while Settings.autosell do
+        local success, errorMsg = pcall(function()
+            ReplicatedStorage.Economy.ToServer.SellUnder:FireServer(Settings.sellValue)
+        end)
+        
+        if not success then
+            warn("[AUTO SELL] Error:", errorMsg)
+        end
+        
+        task.wait(Settings.autosellDelay)
+    end
+    
+    print("[AUTO SELL] Auto sell stopped")
+end
+
+-- ===========================================
+-- UI CREATION FUNCTIONS (REVAMPED)
+-- ===========================================
+
+local function createLifetimeTimer(parent, expiryTimestamp)
+    local lifetimeFrame = Instance.new("Frame", parent)
+    lifetimeFrame.Name = "LifetimeFrame"
+    lifetimeFrame.Size = UDim2.new(0, 250, 0, 120)
+    lifetimeFrame.Position = UDim2.new(0.5, -125, 0, 20)
+    lifetimeFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    lifetimeFrame.BackgroundTransparency = 0.05
+    lifetimeFrame.BorderSizePixel = 0
+    
+    local UICorner = Instance.new("UICorner", lifetimeFrame)
+    UICorner.CornerRadius = UDim.new(0, 12)
+    
+    local stroke = Instance.new("UIStroke", lifetimeFrame)
+    stroke.Color = Color3.fromRGB(0, 170, 255)
+    stroke.Thickness = 2
+    stroke.Transparency = 0.1
+    
+    local gradient = Instance.new("UIGradient", lifetimeFrame)
+    gradient.Rotation = 90
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 170, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 100, 200))
+    })
+    gradient.Transparency = NumberSequence.new(0.6)
+    
+    -- Shadow
+    local shadow = Instance.new("ImageLabel", lifetimeFrame)
+    shadow.Size = UDim2.new(1, 10, 1, 10)
+    shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://5554236805"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.7
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(23, 23, 277, 277)
+    shadow.ZIndex = -1
+    
+    local userIdLabel = Instance.new("TextLabel", lifetimeFrame)
+    userIdLabel.Size = UDim2.new(1, 0, 0, 20)
+    userIdLabel.Position = UDim2.new(0, 0, 0, 5)
+    userIdLabel.Text = "USER ID: " .. player.UserId
+    userIdLabel.Font = Enum.Font.GothamBold
+    userIdLabel.TextColor3 = Color3.fromRGB(0, 200, 255)
+    userIdLabel.TextSize = 12
+    userIdLabel.BackgroundTransparency = 1
+    userIdLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    local titleLabel = Instance.new("TextLabel", lifetimeFrame)
+    titleLabel.Size = UDim2.new(1, 0, 0, 20)
+    titleLabel.Position = UDim2.new(0, 0, 0, 25)
+    titleLabel.Text = "⏰ SCRIPT LIFETIME"
+    titleLabel.Font = Enum.Font.GothamBlack
+    titleLabel.TextColor3 = Color3.fromRGB(0, 220, 255)
+    titleLabel.TextSize = 14
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    local timeLabel = Instance.new("TextLabel", lifetimeFrame)
+    timeLabel.Size = UDim2.new(1, 0, 0, 25)
+    timeLabel.Position = UDim2.new(0, 0, 0, 45)
+    timeLabel.Text = "00:00:00"
+    timeLabel.Font = Enum.Font.GothamSemibold
+    timeLabel.TextColor3 = Color3.new(1, 1, 1)
+    timeLabel.TextSize = 18
+    timeLabel.BackgroundTransparency = 1
+    timeLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    -- ANTI-AFK STATUS LABEL (NEW)
+    local afkStatusLabel = Instance.new("TextLabel", lifetimeFrame)
+    afkStatusLabel.Name = "AFKStatusLabel"
+    afkStatusLabel.Size = UDim2.new(1, 0, 0, 20)
+    afkStatusLabel.Position = UDim2.new(0, 0, 0, 75)
+    afkStatusLabel.Text = "🔄 Anti-AFK: READY"
+    afkStatusLabel.Font = Enum.Font.GothamBold
+    afkStatusLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
+    afkStatusLabel.TextSize = 12
+    afkStatusLabel.BackgroundTransparency = 1
+    afkStatusLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    -- Expiry Time Label
+    local expiryLabel = Instance.new("TextLabel", lifetimeFrame)
+    expiryLabel.Size = UDim2.new(1, 0, 0, 20)
+    expiryLabel.Position = UDim2.new(0, 0, 0, 95)
+    expiryLabel.Text = "Expiry: Calculating..."
+    expiryLabel.Font = Enum.Font.Gotham
+    expiryLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    expiryLabel.TextSize = 11
+    expiryLabel.BackgroundTransparency = 1
+    expiryLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    MakeDraggable(lifetimeFrame)
+    
+    task.spawn(function()
+        while lifetimeRunning do
+            local elapsed = tick() - scriptStartTime
+            local hours = math.floor(elapsed / 3600)
+            local minutes = math.floor((elapsed % 3600) / 60)
+            local seconds = math.floor(elapsed % 60)
+            timeLabel.Text = string.format("%02d:%02d:%02d", hours, minutes, seconds)
+            
+            -- Update Anti-AFK status
+            if Settings.antiAFK and Settings.autoFarm then
+                local timeSinceLastAFK = tick() - lastAFKMovementTime
+                local timeLeft = Settings.antiAFKInterval - timeSinceLastAFK
+                
+                if timeLeft > 0 then
+                    local minutesLeft = math.floor(timeLeft / 60)
+                    local secondsLeft = math.floor(timeLeft % 60)
+                    afkStatusLabel.Text = string.format("🔄 Anti-AFK: %02d:%02d", minutesLeft, secondsLeft)
+                    afkStatusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+                else
+                    afkStatusLabel.Text = "🔄 Anti-AFK: NOW"
+                    afkStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                end
+            elseif Settings.antiAFK then
+                afkStatusLabel.Text = "🔄 Anti-AFK: READY"
+                afkStatusLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
+            else
+                afkStatusLabel.Text = "🔄 Anti-AFK: OFF"
+                afkStatusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+            end
+            
+            task.wait(1)
+        end
+    end)
+    
+    if expiryTimestamp then
+        local expiryTimerFunc = createExpiryTimer(expiryTimestamp)
+        
+        task.spawn(function()
+            while lifetimeRunning do
+                local timeLeft = expiryTimerFunc()
+                if timeLeft == "EXPIRED" then
+                    userIdLabel.Text = "EXPIRED - RESTART SCRIPT"
+                    userIdLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+                    titleLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+                    timeLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+                    afkStatusLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+                    expiryLabel.Text = "Expired"
+                    expiryLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+                    break
+                end
+                expiryLabel.Text = "Expiry: " .. timeLeft
+                task.wait(1)
+            end
+        end)
+    end
+    
+    return lifetimeFrame
+end
+
+local function CreateTextBox(p, t, d, n, callback, tooltipText)
+    local Con = Instance.new("Frame", p)
+    Con.Size = UDim2.new(0.95, 0, 0, 75)
+    Con.BackgroundTransparency = 1
+    
+    local L = Instance.new("TextLabel", Con)
+    L.Size = UDim2.new(1, 0, 0, 20)
+    L.Text = t
+    L.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+    L.Font = Enum.Font.GothamSemibold
+    L.TextXAlignment = Enum.TextXAlignment.Left
+    L.BackgroundTransparency = 1
+    
+    local B = Instance.new("TextBox", Con)
+    B.Size = UDim2.new(1, 0, 0, 40)
+    B.Position = UDim2.new(0, 0, 0, 22)
+    B.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    B.Text = tostring(d)
+    B.TextColor3 = Color3.new(1, 1, 1)
+    B.Font = Enum.Font.Gotham
+    B.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+    B.PlaceholderText = n
+    B.ClearTextOnFocus = false
+    
+    local UICorner = Instance.new("UICorner", B)
+    UICorner.CornerRadius = UDim.new(0, 8)
+    
+    local stroke = Instance.new("UIStroke", B)
+    stroke.Color = Color3.fromRGB(60, 60, 80)
+    stroke.Thickness = 2
+    
+    -- Shadow for TextBox
+    local shadow = Instance.new("ImageLabel", B)
+    shadow.Size = UDim2.new(1, 10, 1, 10)
+    shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://5554236805"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.8
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(23, 23, 277, 277)
+    shadow.ZIndex = -1
+    
+    B.Focused:Connect(function()
+        stroke.Color = Color3.fromRGB(0, 170, 255)
+        TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(40, 40, 55)}):Play()
+    end)
+    
+    B.FocusLost:Connect(function(e)
+        stroke.Color = Color3.fromRGB(60, 60, 80)
+        TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(30, 30, 45)}):Play()
+        
+        if e then
+            local val = tonumber(B.Text)
+            if val then 
+                callback(val)
+                B.Text = tostring(val)
+            else
+                B.Text = tostring(d)
+            end
+        end
+    end)
+    
+    B.MouseEnter:Connect(function()
+        TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(35, 35, 50)}):Play()
+    end)
+    
+    B.MouseLeave:Connect(function()
+        if not B:IsFocused() then
+            TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(30, 30, 45)}):Play()
+        end
+    end)
+    
+    if tooltipText then
+        local tooltip = Instance.new("TextLabel", B)
+        tooltip.Size = UDim2.new(0, 200, 0, 50)
+        tooltip.Position = UDim2.new(0, 0, 1, 5)
+        tooltip.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        tooltip.TextColor3 = Color3.new(1,1,1)
+        tooltip.Text = tooltipText
+        tooltip.TextWrapped = true
+        tooltip.Visible = false
+        tooltip.ZIndex = 10
+        local tooltipCorner = Instance.new("UICorner", tooltip)
+        tooltipCorner.CornerRadius = UDim.new(0, 6)
+        
+        B.MouseEnter:Connect(function()
+            tooltip.Visible = true
+        end)
+        B.MouseLeave:Connect(function()
+            tooltip.Visible = false
+        end)
+    end
+    
+    return B
+end
+
+local function CreateToggle(p, t, callback, storeKey, tooltipText)
+    local B = Instance.new("TextButton", p)
+    B.Size = UDim2.new(0.95, 0, 0, 45)
+    B.BackgroundColor3 = Color3.fromRGB(45, 45, 60)
+    B.Text = t .. ": OFF"
+    B.TextColor3 = Color3.fromRGB(200, 200, 200)
+    B.Font = Enum.Font.GothamSemibold
+    B.TextSize = 14
+    B.AutoButtonColor = false
+    
+    local ToggleCorner = Instance.new("UICorner", B)
+    ToggleCorner.CornerRadius = UDim.new(0, 10)
+    
+    local stroke = Instance.new("UIStroke", B)
+    stroke.Color = Color3.fromRGB(60, 60, 80)
+    stroke.Thickness = 2
+    
+    -- Shadow for Toggle
+    local shadow = Instance.new("ImageLabel", B)
+    shadow.Size = UDim2.new(1, 10, 1, 10)
+    shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://5554236805"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.8
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(23, 23, 277, 277)
+    shadow.ZIndex = -1
+    
+    if storeKey == "NoClip" or storeKey == "InfOxygen" then
+        B.Text = t .. ": ON (Auto)"
+        B.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+        B.TextColor3 = Color3.new(1, 1, 1)
+        stroke.Color = Color3.fromRGB(0, 140, 255)
+        
+        B.MouseEnter:Connect(function()
+            TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(0, 190, 255)}):Play()
+        end)
+        
+        B.MouseLeave:Connect(function()
+            TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(0, 170, 255)}):Play()
+        end)
+    else
+        B.MouseEnter:Connect(function()
+            if B.BackgroundColor3 ~= Color3.fromRGB(0, 170, 255) then
+                TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(55, 55, 70)}):Play()
+            end
+        end)
+        
+        B.MouseLeave:Connect(function()
+            if B.BackgroundColor3 ~= Color3.fromRGB(0, 170, 255) then
+                TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(45, 45, 60)}):Play()
+            end
+        end)
+        
+        local isActive = false
+        B.MouseButton1Click:Connect(function()
+            if Settings.autoFarm and storeKey == "Freeze" then
+                return
+            end
+            
+            isActive = not isActive
+            B.Text = t .. ": " .. (isActive and "ON" or "OFF")
+            
+            local tweenInfo = TweenInfo.new(0.2)
+            if isActive then
+                TweenService:Create(B, tweenInfo, {
+                    BackgroundColor3 = Color3.fromRGB(0, 170, 255),
+                    TextColor3 = Color3.new(1, 1, 1)
+                }):Play()
+                TweenService:Create(stroke, tweenInfo, {Color = Color3.fromRGB(0, 140, 255)}):Play()
+            else
+                TweenService:Create(B, tweenInfo, {
+                    BackgroundColor3 = Color3.fromRGB(45, 45, 60),
+                    TextColor3 = Color3.fromRGB(200, 200, 200)
+                }):Play()
+                TweenService:Create(stroke, tweenInfo, {Color = Color3.fromRGB(60, 60, 80)}):Play()
+            end
+            
+            callback(isActive)
+        end)
+    end
+    
+    if tooltipText then
+        local tooltip = Instance.new("TextLabel", B)
+        tooltip.Size = UDim2.new(0, 200, 0, 50)
+        tooltip.Position = UDim2.new(0, 0, 1, 5)
+        tooltip.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        tooltip.TextColor3 = Color3.new(1,1,1)
+        tooltip.Text = tooltipText
+        tooltip.TextWrapped = true
+        tooltip.Visible = false
+        tooltip.ZIndex = 10
+        local tooltipCorner = Instance.new("UICorner", tooltip)
+        tooltipCorner.CornerRadius = UDim.new(0, 6)
+        
+        B.MouseEnter:Connect(function()
+            tooltip.Visible = true
+        end)
+        B.MouseLeave:Connect(function()
+            tooltip.Visible = false
+        end)
+    end
+    
+    if storeKey then
+        toggleReferences[storeKey] = B
+    end
+    
+    return B
+end
+
+local function CreateSelector(p, t, items, callback, tooltipText)
+    local Con = Instance.new("Frame", p)
+    Con.Size = UDim2.new(0.95, 0, 0, 60)
+    Con.BackgroundTransparency = 1
+    
+    local L = Instance.new("TextLabel", Con)
+    L.Size = UDim2.new(1, 0, 0, 20)
+    L.Text = t
+    L.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+    L.Font = Enum.Font.Gotham
+    L.TextXAlignment = Enum.TextXAlignment.Left
+    L.BackgroundTransparency = 1
+    
+    local B = Instance.new("TextButton", Con)
+    B.Size = UDim2.new(1, 0, 0, 35)
+    B.Position = UDim2.new(0, 0, 0, 22)
+    B.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    B.TextColor3 = Color3.fromRGB(0, 200, 255)
+    B.Font = Enum.Font.GothamBold
+    B.Text = items[1]
+    B.AutoButtonColor = false
+    
+    local SelectorCorner = Instance.new("UICorner", B)
+    SelectorCorner.CornerRadius = UDim.new(0, 8)
+    
+    local stroke = Instance.new("UIStroke", B)
+    stroke.Color = Color3.fromRGB(60, 60, 80)
+    stroke.Thickness = 2
+    
+    -- Shadow for Selector
+    local shadow = Instance.new("ImageLabel", B)
+    shadow.Size = UDim2.new(1, 10, 1, 10)
+    shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://5554236805"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.8
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(23, 23, 277, 277)
+    shadow.ZIndex = -1
+    
+    B.MouseEnter:Connect(function()
+        TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(40, 40, 55)}):Play()
+    end)
+    
+    B.MouseLeave:Connect(function()
+        TweenService:Create(B, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(30, 30, 45)}):Play()
+    end)
+    
+    local idx = 1
+    B.MouseButton1Click:Connect(function()
+        idx = idx % #items + 1
+        B.Text = items[idx]
+        TweenService:Create(B, TweenInfo.new(0.1), {TextColor3 = Color3.fromRGB(0, 220, 255)}):Play()
+        TweenService:Create(B, TweenInfo.new(0.1), {TextColor3 = Color3.fromRGB(0, 200, 255)}):Play()
+        callback(items[idx])
+    end)
+    
+    if tooltipText then
+        local tooltip = Instance.new("TextLabel", B)
+        tooltip.Size = UDim2.new(0, 200, 0, 50)
+        tooltip.Position = UDim2.new(0, 0, 1, 5)
+        tooltip.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        tooltip.TextColor3 = Color3.new(1,1,1)
+        tooltip.Text = tooltipText
+        tooltip.TextWrapped = true
+        tooltip.Visible = false
+        tooltip.ZIndex = 10
+        local tooltipCorner = Instance.new("UICorner", tooltip)
+        tooltipCorner.CornerRadius = UDim.new(0, 6)
+        
+        B.MouseEnter:Connect(function()
+            tooltip.Visible = true
+        end)
+        B.MouseLeave:Connect(function()
+            tooltip.Visible = false
+        end)
+    end
+    
+    return B
+end
+
+local function CreateTab(container, contentHolder, name, isFirst)
+    local TabBtn = Instance.new("TextButton", container)
+    TabBtn.Size = UDim2.new(0.9, 0, 0, 40)
+    TabBtn.BackgroundColor3 = isFirst and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(40, 40, 55)
+    TabBtn.Text = name
+    TabBtn.Font = Enum.Font.GothamSemibold
+    TabBtn.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+    TabBtn.TextSize = 14
+    TabBtn.AutoButtonColor = false
+    
+    local TabCorner = Instance.new("UICorner", TabBtn)
+    TabCorner.CornerRadius = UDim.new(0, 10)
+    
+    local stroke = Instance.new("UIStroke", TabBtn)
+    stroke.Color = Color3.fromRGB(60, 60, 80)
+    stroke.Thickness = 1
+    
+    -- Shadow for Tab
+    local shadow = Instance.new("ImageLabel", TabBtn)
+    shadow.Size = UDim2.new(1, 10, 1, 10)
+    shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://5554236805"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.8
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(23, 23, 277, 277)
+    shadow.ZIndex = -1
+    
+    local Page = Instance.new("ScrollingFrame", contentHolder)
+    Page.Size = UDim2.new(1, 0, 1, 0)
+    Page.BackgroundTransparency = 1
+    Page.Visible = isFirst
+    Page.ScrollBarThickness = 4
+    Page.ScrollBarImageColor3 = Color3.fromRGB(0, 170, 255)
+    Page.ScrollBarImageTransparency = 0.5
+    Page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    
+    local PageList = Instance.new("UIListLayout", Page)
+    PageList.Padding = UDim.new(0, 12)
+    
+    TabBtn.MouseEnter:Connect(function()
+        if TabBtn.BackgroundColor3 ~= Color3.fromRGB(0, 170, 255) then
+            TweenService:Create(TabBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(50, 50, 65)}):Play()
+        end
+    end)
+    
+    TabBtn.MouseLeave:Connect(function()
+        if TabBtn.BackgroundColor3 ~= Color3.fromRGB(0, 170, 255) then
+            TweenService:Create(TabBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(40, 40, 55)}):Play()
+        end
+    end)
+    
+    TabBtn.MouseButton1Click:Connect(function()
+        for _, v in pairs(contentHolder:GetChildren()) do 
+            if v:IsA("ScrollingFrame") then 
+                v.Visible = false 
+            end 
+        end
+        for _, v in pairs(container:GetChildren()) do 
+            if v:IsA("TextButton") then 
+                TweenService:Create(v, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(40, 40, 55)}):Play()
+            end 
+        end
+        TweenService:Create(TabBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(0, 170, 255)}):Play()
+        Page.Visible = true
+    end)
+    
+    return Page
+end
+
+-- ===========================================
+-- MAIN GUI CREATION (REVAMPED)
+-- ===========================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "DualityHub_Premium"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = pgui
+
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Size = UDim2.new(0, 620, 0, 520)
+MainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
+MainFrame.BackgroundTransparency = 0.02
+MainFrame.BorderSizePixel = 0
+MainFrame.Visible = false
+
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 16)
+
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = Color3.fromRGB(0, 170, 255)
+MainStroke.Thickness = 2
+MainStroke.Transparency = 0.2
+
+local MainGradient = Instance.new("UIGradient", MainFrame)
+MainGradient.Rotation = 90
+MainGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 50, 100)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 15, 25))
+})
+MainGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.6),
+    NumberSequenceKeypoint.new(1, 0)
+})
+
+-- Shadow for MainFrame
+local mainShadow = Instance.new("ImageLabel", MainFrame)
+mainShadow.Size = UDim2.new(1, 20, 1, 20)
+mainShadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+mainShadow.AnchorPoint = Vector2.new(0.5, 0.5)
+mainShadow.BackgroundTransparency = 1
+mainShadow.Image = "rbxassetid://5554236805"
+mainShadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+mainShadow.ImageTransparency = 0.6
+mainShadow.ScaleType = Enum.ScaleType.Slice
+mainShadow.SliceCenter = Rect.new(23, 23, 277, 277)
+mainShadow.ZIndex = -1
+
+local Sidebar = Instance.new("Frame", MainFrame)
+Sidebar.Size = UDim2.new(0, 140, 1, 0)
+Sidebar.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
+Sidebar.BackgroundTransparency = 0
+
+local SidebarCorner = Instance.new("UICorner", Sidebar)
+SidebarCorner.CornerRadius = UDim.new(0, 16)
+
+local SidebarStroke = Instance.new("UIStroke", Sidebar)
+SidebarStroke.Color = Color3.fromRGB(0, 150, 255)
+SidebarStroke.Thickness = 1
+SidebarStroke.Transparency = 0.1
+
+local Header = Instance.new("Frame", Sidebar)
+Header.Size = UDim2.new(1, 0, 0, 90)
+Header.BackgroundTransparency = 1
+
+local LogoContainer = Instance.new("Frame", Header)
+LogoContainer.Size = UDim2.new(1, 0, 0, 70)
+LogoContainer.Position = UDim2.new(0, 0, 0, 10)
+LogoContainer.BackgroundTransparency = 1
+
+local LogoText = Instance.new("TextLabel", LogoContainer)
+LogoText.Size = UDim2.new(1, 0, 1, 0)
+LogoText.Text = "DUALITY HUB"
+LogoText.Font = Enum.Font.GothamBlack
+LogoText.TextColor3 = Color3.fromRGB(0, 200, 255)
+LogoText.TextSize = 24
+LogoText.BackgroundTransparency = 1
+LogoText.TextXAlignment = Enum.TextXAlignment.Center
+
+local LogoSubtext = Instance.new("TextLabel", LogoContainer)
+LogoSubtext.Size = UDim2.new(1, 0, 0, 20)
+LogoSubtext.Position = UDim2.new(0, 0, 0, 40)
+LogoSubtext.Text = "PREMIUM EDITION"
+LogoSubtext.Font = Enum.Font.GothamMedium
+LogoSubtext.TextColor3 = Color3.fromRGB(0, 170, 255)
+LogoSubtext.TextSize = 11
+LogoSubtext.BackgroundTransparency = 1
+LogoSubtext.TextXAlignment = Enum.TextXAlignment.Center
+
+local TabContainer = Instance.new("Frame", Sidebar)
+TabContainer.Size = UDim2.new(1, 0, 1, -90)
+TabContainer.Position = UDim2.new(0, 0, 0, 90)
+TabContainer.BackgroundTransparency = 1
+
+local TabList = Instance.new("UIListLayout", TabContainer)
+TabList.Padding = UDim.new(0, 10)
+TabList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local ContentHolder = Instance.new("Frame", MainFrame)
+ContentHolder.Size = UDim2.new(1, -150, 1, -20)
+ContentHolder.Position = UDim2.new(0, 145, 0, 10)
+ContentHolder.BackgroundTransparency = 1
+
+-- Close Button
+local CloseBtn = Instance.new("TextButton", MainFrame)
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -35, 0, 5)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 20
+CloseBtn.AutoButtonColor = false
+
+CloseBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+end)
+
+CloseBtn.MouseEnter:Connect(function()
+    TweenService:Create(CloseBtn, TweenInfo.new(0.2), {TextColor3 = Color3.fromRGB(255, 50, 50)}):Play()
+end)
+
+CloseBtn.MouseLeave:Connect(function()
+    TweenService:Create(CloseBtn, TweenInfo.new(0.2), {TextColor3 = Color3.fromRGB(255, 100, 100)}):Play()
+end)
+
+MakeDraggable(MainFrame, Header)
+
+-- ===========================================
+-- CREATE TABS
+-- ===========================================
+
+local SettingsTab = CreateTab(TabContainer, ContentHolder, "⚙️ Settings", true)
+local FishTab = CreateTab(TabContainer, ContentHolder, "🎣 Fishing", false)
+local MoveTab = CreateTab(TabContainer, ContentHolder, "🚶 Movement", false)
+local TeleTab = CreateTab(TabContainer, ContentHolder, "📍 Teleport", false)
+local FarmTab = CreateTab(TabContainer, ContentHolder, "💰 Farm", false)
+local ShopTab = CreateTab(TabContainer, ContentHolder, "🛒 Shop", false)
+local StoneTab = CreateTab(TabContainer, ContentHolder, "💎 Stones", false)
+
+local function AddPadding(frame)
+    local Padding = Instance.new("UIPadding", frame)
+    Padding.PaddingLeft = UDim.new(0, 10)
+    Padding.PaddingRight = UDim.new(0, 10)
+    Padding.PaddingTop = UDim.new(0, 10)
+    Padding.PaddingBottom = UDim.new(0, 10)
+    return Padding
+end
+
+AddPadding(SettingsTab)
+AddPadding(FishTab)
+AddPadding(MoveTab)
+AddPadding(TeleTab)
+AddPadding(FarmTab)
+AddPadding(ShopTab)
+AddPadding(StoneTab)
+
+-- ===========================================
+-- FISHING TAB CONTENT
+-- ===========================================
+
+CreateToggle(FishTab, "🎯 Auto Farm", function(v)
+    Settings.autoFarm = v
+    
+    if v then 
+        modeTimer = 0
+        currentModeDelay = 2.5
+        Settings.fishingDelay = 2.5
+        
+        ROD_CHECK_COUNTER = 0
+        rodNotFoundWarningShown = false
+        
+        isFirstCycle = true
+        cycleCounter = 0
+        
+        print("[ANTI-CHEAT] Auto Farm started - First cycle will NOT use remote parked")
+        
+        setupAutoFarm()
+        
+        if Settings.fishingMode == "Fast" then
+            startModeTimer()
+        end
+        
+        autoFishingTask = task.spawn(function()
+            optimizedAutoFishing()
+        end)
+        
+        print("[AUTO FARM] Auto Farm started (Fast mode: 2.5↔3.0s every 30s)")
+        
+    else
+        if fishingModeTask then
+            fishingModeTask:Disconnect()
+            fishingModeTask = nil
+        end
+        
+        if autoFishingTask then
+            task.cancel(autoFishingTask)
+            autoFishingTask = nil
+        end
+        
+        disableAutoFarm()
+        
+        print("[AUTO FARM] Auto Farm stopped")
+    end
+end, nil, "Automatically farms fish with anti-cheat bypass")
+
+local modeList = {"Fast", "Legit"}
+CreateSelector(FishTab, "🎮 Fishing Mode (Fast: 2.5↔3.0s/30s):", modeList, function(v)
+    Settings.fishingMode = v
+    
+    if v == "Legit" then
+        Settings.fishingDelay = 3.5
+        if fishingModeTask then
+            fishingModeTask:Disconnect()
+            fishingModeTask = nil
+        end
+    else
+        Settings.fishingDelay = 2.5
+        currentModeDelay = 2.5
+        modeTimer = 0
+        
+        if Settings.autoFarm then
+            startModeTimer()
+        end
+    end
+end, "Choose between fast or legit fishing modes")
+
+local zoneList = {"Mira nusa", "Deep Sea 1", "Deep Sea 2", "Tropical Isle", "Mega Zone", "MAJITOS Zone", "MAJITOS Zone 2", "Kinyis Isle", "Skyler Zone"}
+CreateSelector(FishTab, "📍 Select Fishing Zone:", zoneList, function(v)
+    Settings.selectedZone = v
+    
+    local character = player.Character
+    if character and character:FindFirstChild("HumanoidRootPart") then
+        local root = character.HumanoidRootPart
+        
+        if Settings.autoFarm then
+            Settings.freeze = false
+            task.wait(0.05)
+            
+            root.CFrame = CFrame.new(ZoneData[v].parkedPos)
+            task.wait(0.1)
+            
+            Settings.freeze = true
+            Settings.freezePos = root.CFrame
+            
+            isFirstCycle = true
+            cycleCounter = 0
+            print("[ANTI-CHEAT] Zone changed to " .. v .. " - First cycle in new zone will NOT use remote parked")
+            
+            updateToggleUI()
+        else
+            root.CFrame = CFrame.new(ZoneData[v].charPos)
+        end
+    end
+end, "Select a zone to fish in")
+
+-- ===========================================
+-- SETTINGS TAB CONTENT (WITH ANTI-AFK)
+-- ===========================================
+
+CreateToggle(SettingsTab, "⚡ Boost Ping", function(v)
+    Settings.boostPing = v
+    if v then
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        game.Lighting.GlobalShadows = false
+        game.Lighting.Brightness = 0
+        game.Lighting.FogEnd = 0
+        workspace.StreamingEnabled = true
+        task.spawn(function()
+            while Settings.boostPing do
+                for _, obj in ipairs(workspace:GetDescendants()) do
+                    if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Sparkles") or obj:IsA("Smoke") or obj:IsA("Fire") then
+                        obj.Enabled = false
+                    elseif obj:IsA("Decal") and obj.Parent:IsA("Part") then
+                        obj:Destroy()
+                    end
+                end
+                task.wait(2)
+            end
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic
+            game.Lighting.GlobalShadows = true
+            game.Lighting.Brightness = 1
+            game.Lighting.FogEnd = math.huge
+        end)
+    end
+end, nil, "Optimizes performance to boost ping")
+
+-- ANTI-AFK TOGGLE (NEW)
+CreateToggle(SettingsTab, "🔄 Anti-AFK (15min)", function(v)
+    Settings.antiAFK = v
+    
+    if v then
+        print("[ANTI-AFK] System enabled (15 minute interval)")
+        if Settings.autoFarm then
+            startAntiAFKSystem()
+        end
+    else
+        print("[ANTI-AFK] System disabled")
+        stopAntiAFKSystem()
+    end
+end, nil, "Prevents AFK kick every 15 minutes")
+
+-- ANTI-AFK INTERVAL (NEW)
+CreateTextBox(SettingsTab, "⏱️ Anti-AFK Interval (seconds)", Settings.antiAFKInterval, "Default: 900 (15 min)", function(v) 
+    Settings.antiAFKInterval = math.max(60, v)
+    print("[ANTI-AFK] Interval changed to " .. v .. " seconds (" .. math.floor(v/60) .. " minutes)")
+    
+    if Settings.antiAFK and Settings.autoFarm then
+        startAntiAFKSystem()
+    end
+end, "Set the interval for anti-AFK movements")
+
+-- ANTI-AFK MINIMAL MOVEMENT TOGGLE (NEW)
+CreateToggle(SettingsTab, "🔬 Minimal Movement", function(v)
+    Settings.antiAFKMinimalMovement = v
+    print("[ANTI-AFK] Minimal movement: " .. (v and "ENABLED" or "DISABLED"))
+end, nil, "Uses minimal invisible movements for anti-AFK")
+
+-- ===========================================
+-- MOVEMENT TAB CONTENT
+-- ===========================================
+
+CreateToggle(MoveTab, "👻 NoClip", function(v)
+end, "NoClip", "Allows walking through walls")
+
+CreateToggle(MoveTab, "❄️ Freeze Player", function(v) 
+    if Settings.autoFarm then return end
+    
+    Settings.freeze = v
+    if v and player.Character:FindFirstChild("HumanoidRootPart") then 
+        Settings.freezePos = player.Character.HumanoidRootPart.CFrame 
+    end
+end, "Freeze", "Freezes player in place")
+
+CreateToggle(MoveTab, "🌊 Infinite Oxygen", function(v)
+end, "InfOxygen", "Provides infinite oxygen underwater")
+
+-- ===========================================
+-- FARM TAB CONTENT
+-- ===========================================
+
+CreateToggle(FarmTab, "💰 Auto Sell Fish", function(v) 
+    Settings.autosell = v 
+    if v then 
+        task.spawn(function() 
+            startAutoSell()
+        end) 
+    end 
+end, nil, "Automatically sells fish under value")
+
+CreateTextBox(FarmTab, "⏱️ Auto Sell Delay", Settings.autosellDelay, "Minimal 70 detik", function(v) 
+    Settings.autosellDelay = math.max(70, v)
+end, "Delay between auto sells")
+
+CreateTextBox(FarmTab, "💵 Sell Value", Settings.sellValue, "Price threshold for Auto Sell", function(v) 
+    Settings.sellValue = v 
+end, "Sell fish under this value")
+
+CreateToggle(FarmTab, "🐛 Auto Farm Worm", function(v)
+    Settings.autoworm = v
+    if v and player.Character:FindFirstChild("HumanoidRootPart") then 
+        player.Character.HumanoidRootPart.CFrame = CFrame.new(Settings.wormSpot) 
+    end
+    task.spawn(function()
+        while Settings.autoworm do
+            for _, o in ipairs(workspace:GetChildren()) do
+                if o.Name:upper():find("CACING") and o:IsA("BasePart") then
+                    player.Character.HumanoidRootPart.CFrame = o.CFrame * CFrame.new(0,3,0)
+                    task.wait(0.3)
+                    fireproximityprompt(o:FindFirstChildOfClass("ProximityPrompt"))
+                    task.wait(2)
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end, nil, "Automatically farms worms")
+
+-- ===========================================
+-- SHOP TAB CONTENT
+-- ===========================================
+
+local potionList = {"SMALL_POTION", "MEDIUM_POTION", "BIG_POTION", "LARGE_POTION", "EXTREME_POTION"}
+CreateSelector(ShopTab, "🧪 Select Potion:", potionList, function(v) 
+    Settings.potionSelect = v 
+end, "Select potion to buy")
+
+CreateTextBox(ShopTab, "⏱️ Potion Buy Delay", Settings.potionDelay, "Delay in Seconds", function(v) 
+    Settings.potionDelay = v 
+end, "Delay between potion buys")
+
+CreateToggle(ShopTab, "🔄 Auto Buy Potion", function(v) 
+    Settings.autoBuyPotion = v 
+    task.spawn(function() 
+        while Settings.autoBuyPotion do 
+            ReplicatedStorage.Potion.ToServer.PurchasePotion:FireServer(Settings.potionSelect) 
+            task.wait(Settings.potionDelay) 
+        end 
+    end) 
+end, nil, "Automatically buys selected potion")
+
+local skinList = {"SKINCF_FAIRY_SPARK", "SKINCF_SAMURAI_LIGHTNING", "SKINCF_VERINOS", "SKINCF_BLUE_DRAGON", "SKINCF_COSMIC_EYE", "SKINCF_AQUA_HALO", "SKINCF_SKY_RELIC"}
+CreateSelector(ShopTab, "🎨 Select Skin:", skinList, function(v) 
+    Settings.skinSelect = v 
+end, "Select skin to buy")
+
+CreateToggle(ShopTab, "🔄 Auto Buy Skin", function(v) 
+    Settings.autoBuySkin = v 
+    task.spawn(function() 
+        while Settings.autoBuySkin do 
+            ReplicatedStorage.RodSkin.ToServer.PurchaseSkinCF:FireServer(Settings.skinSelect) 
+            task.wait(3) 
+        end 
+    end) 
+end, nil, "Automatically buys selected skin")
+
+local rodList = {"PINKYS", "SAMURAI", "VERINOS", "DESTROYER", "GALAXY", "ENTROPY", "LEGEND"}
+CreateSelector(ShopTab, "🎣 Select Rod:", rodList, function(v) 
+    Settings.rodSelect = v 
+end, "Select rod to buy")
+
+CreateToggle(ShopTab, "🔄 Auto Buy Rod", function(v) 
+    Settings.autoBuyRod = v 
+    task.spawn(function() 
+        while Settings.autoBuyRod do 
+            ReplicatedStorage.RodShop.ToServer.PurchaseRod:FireServer(Settings.rodSelect) 
+            task.wait(3) 
+        end 
+    end) 
+end, nil, "Automatically buys selected rod")
+
+local bobberList = {"BOBBER_ROYAL", "BOBBER_STARTER", "BOBBER_LIGHT", "BOBBER_PLASMA", "BOBBER_LUNAR", "BOBBER_VORTEX"}
+CreateSelector(ShopTab, "🌀 Select Bobber:", bobberList, function(v) 
+    Settings.bobberSelect = v 
+end, "Select bobber to buy")
+
+CreateToggle(ShopTab, "🔄 Auto Buy Bobber", function(v) 
+    Settings.autoBuyBobber = v 
+    task.spawn(function() 
+        while Settings.autoBuyBobber do 
+            ReplicatedStorage.BobberShop.ToServer.BuyBobber:FireServer(Settings.bobberSelect) 
+            task.wait(3) 
+        end 
+    end) 
+end, nil, "Automatically buys selected bobber")
+
+-- ===========================================
+-- TELEPORT TAB CONTENT
+-- ===========================================
+
+local zones = {
+    {"Skyler Zone", Vector3.new(-1617, 1033, 1552)},
+    {"Kinyis Isle", Vector3.new(-54, 1021, -1092)},
+    {"MAJITOS Zone", Vector3.new(2443, 1036, 140)},
+    {"MAJITOS Zone 2", Vector3.new(2624, 923, -3)},
+    {"Mira Nusa Isle", Vector3.new(-248, 1035, 591)},
+    {"Mega Zone", Vector3.new(-623, 1004, -1728)},
+    {"Tropical Isle", Vector3.new(-1831, 1025, -1855)},
+    {"Deep Sea 1", Vector3.new(1015, 1008, 1633)},
+    {"Deep Sea 2", Vector3.new(1194, 876, 2025)}
+}
+
+for _, z in ipairs(zones) do
+    CreateToggle(TeleTab, "📍 " .. z[1], function(v) 
+        if v and player.Character:FindFirstChild("HumanoidRootPart") then 
+            player.Character.HumanoidRootPart.CFrame = CFrame.new(z[2]) 
+        end 
+    end, nil, "Teleport to " .. z[1])
+end
+
+-- ===========================================
+-- STONE ZONES TAB CONTENT
+-- ===========================================
+
+local stones = {
+    {"Stone 1", Vector3.new(-195.7, 977.6, 1335.2)}, 
+    {"Stone 2", Vector3.new(1370.1, 977.6, -794.4)}, 
+    {"Stone 3", Vector3.new(-2547.4, 977.6, 363.6)}, 
+    {"Stone 4", Vector3.new(-1699.2, 977.6, 876.3)}, 
+    {"Stone 5", Vector3.new(-1032.4, 986.2, 280.5)}, 
+    {"Stone 6", Vector3.new(-1636.3, 977.6, -716.7)}, 
+    {"Stone 7", Vector3.new(-540.5, 977.6, -809.8)}, 
+    {"Stone 8", Vector3.new(928.4, 985.7, 372.2)}
+}
+
+for _, s in ipairs(stones) do
+    CreateToggle(StoneTab, "💎 " .. s[1], function(v) 
+        if v and player.Character:FindFirstChild("HumanoidRootPart") then 
+            player.Character.HumanoidRootPart.CFrame = CFrame.new(s[2]) 
+        end 
+    end, nil, "Teleport to " .. s[1])
+end
+
+-- ===========================================
+-- TOGGLE BUTTON (DRAGGABLE)
+-- ===========================================
+
+local ToggleBtn = Instance.new("TextButton", ScreenGui)
+ToggleBtn.Size = UDim2.new(0, 70, 0, 70)
+ToggleBtn.Position = UDim2.new(0.5, 0, 0.5, 0)
+ToggleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+ToggleBtn.Text = "DH"
+ToggleBtn.TextColor3 = Color3.new(1,1,1)
+ToggleBtn.Font = Enum.Font.GothamBlack
+ToggleBtn.TextSize = 26
+ToggleBtn.ZIndex = 9999
+ToggleBtn.Visible = false
+
+local ToggleCorner = Instance.new("UICorner", ToggleBtn)
+ToggleCorner.CornerRadius = UDim.new(1, 0)
+
+local ToggleStroke = Instance.new("UIStroke", ToggleBtn)
+ToggleStroke.Color = Color3.fromRGB(255, 255, 255)
+ToggleStroke.Thickness = 2
+ToggleStroke.Transparency = 0.2
+
+local ToggleShadow = Instance.new("ImageLabel", ToggleBtn)
+ToggleShadow.Size = UDim2.new(1, 20, 1, 20)
+ToggleShadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+ToggleShadow.AnchorPoint = Vector2.new(0.5, 0.5)
+ToggleShadow.BackgroundTransparency = 1
+ToggleShadow.Image = "rbxassetid://5554236805"
+ToggleShadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+ToggleShadow.ImageTransparency = 0.8
+ToggleShadow.ScaleType = Enum.ScaleType.Slice
+ToggleShadow.SliceCenter = Rect.new(23, 23, 277, 277)
+ToggleShadow.ZIndex = 9998
+
+ToggleBtn.MouseEnter:Connect(function()
+    TweenService:Create(ToggleBtn, TweenInfo.new(0.3), {
+        BackgroundColor3 = Color3.fromRGB(0, 200, 255),
+        Size = UDim2.new(0, 75, 0, 75)
+    }):Play()
+    TweenService:Create(ToggleStroke, TweenInfo.new(0.3), {
+        Color = Color3.fromRGB(255, 255, 200)
+    }):Play()
+end)
+
+ToggleBtn.MouseLeave:Connect(function()
+    TweenService:Create(ToggleBtn, TweenInfo.new(0.3), {
+        BackgroundColor3 = Color3.fromRGB(0, 170, 255),
+        Size = UDim2.new(0, 70, 0, 70)
+    }):Play()
+    TweenService:Create(ToggleStroke, TweenInfo.new(0.3), {
+        Color = Color3.fromRGB(255, 255, 255)
+    }):Play()
+end)
+
+MakeDraggable(ToggleBtn)
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+    if MainFrame.Visible then
+        TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 620, 0, 520)}):Play()
+    end
+end)
+
+-- ===========================================
+-- RUN SERVICE LOOPS
+-- ===========================================
+
+RunService.Stepped:Connect(function()
+    if Settings.noClip and player.Character then
+        applyNoClip(player.Character, true)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if Settings.freeze and Settings.freezePos and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+        local root = player.Character.HumanoidRootPart
+        root.CFrame = Settings.freezePos
+        root.Velocity = Vector3.new(0, 0, 0)
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end
+    
+    if Settings.infOxygen then
+        local oxyScript = player.PlayerScripts:FindFirstChild("OxygenSystem.client")
+        if oxyScript then oxyScript.Disabled = true end
+        if Lighting:FindFirstChild("UnderwaterBlur") then
+            Lighting.UnderwaterBlur:Destroy()
+        end
+    end
+end)
+
+-- ===========================================
+-- CHARACTER ADDED EVENT
+-- ===========================================
+
+player.CharacterAdded:Connect(function(character)
+    task.wait(0.5)
+    
+    if Settings.noClip then
+        applyNoClip(character, true)
+        print("[SYSTEM] NoClip applied to new character")
+    end
+    
+    if Settings.autoFarm then
+        setupAutoFarm()
+    end
+end)
+
+-- ===========================================
+-- INITIALIZATION
+-- ===========================================
+
+enableNoClipAndInfOxygenOnStart()
+
+-- ===========================================
+-- WHITELIST CHECK
+-- ===========================================
+
+task.spawn(function()
+    print("[SYSTEM] Starting whitelist check...")
+    print("[SYSTEM] Player UserID:", player.UserId)
+    print("[SYSTEM] Player Username:", player.Name)
+    print("[SYSTEM] Anti-AFK System: " .. (Settings.antiAFK and "ENABLED (15min interval)" or "DISABLED"))
+    
+    local whitelistStatus, expiryTimestamp = checkWhitelist()
+    
+    if whitelistStatus then
+        print("[SYSTEM] ACCESS GRANTED - Loading Duality Hub...")
+        
+        MainFrame.Visible = true
+        ToggleBtn.Visible = true
+        
+        local lifetimeTimer = createLifetimeTimer(ScreenGui, expiryTimestamp)
+        lifetimeTimer.Visible = true
+        
+        updateToggleUI()
+        
+        isWhitelisted = true
+        
+        task.spawn(function()
+            while isWhitelisted do
+                task.wait(30)
+                local currentTime = os.time()
+                if expiryTimestamp and currentTime > expiryTimestamp then
+                    print("[SYSTEM] ACCESS EXPIRED - Closing script...")
+                    
+                    MainFrame:Destroy()
+                    ToggleBtn:Destroy()
+                    if lifetimeTimer then lifetimeTimer:Destroy() end
+                    
+                    Settings.autoFarm = false
+                    Settings.autosell = false
+                    Settings.autoworm = false
+                    
+                    lifetimeRunning = false
+                    isWhitelisted = false
+                    
+                    local notification = Instance.new("TextLabel", pgui)
+                    notification.Size = UDim2.new(0, 350, 0, 120)
+                    notification.Position = UDim2.new(0.5, -175, 0.5, -60)
+                    notification.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+                    notification.Text = "SCRIPT EXPIRED\n\nPlease renew your subscription\nContact admin for renewal"
+                    notification.TextColor3 = Color3.fromRGB(255, 50, 50)
+                    notification.Font = Enum.Font.GothamBold
+                    notification.TextSize = 18
+                    notification.TextWrapped = true
+                    notification.ZIndex = 10000
+                    
+                    local notifCorner = Instance.new("UICorner", notification)
+                    notifCorner.CornerRadius = UDim.new(0, 12)
+                    
+                    local notifStroke = Instance.new("UIStroke", notification)
+                    notifStroke.Color = Color3.fromRGB(255, 50, 50)
+                    notifStroke.Thickness = 2
+                    
+                    task.wait(5)
+                    notification:Destroy()
+                    
+                    break
+                end
+            end
+        end)
+    else
+        print("[SYSTEM] ACCESS DENIED - Destroying script...")
+        
+        MainFrame:Destroy()
+        ToggleBtn:Destroy()
+        
+        local errorMsg = Instance.new("TextLabel", pgui)
+        errorMsg.Size = UDim2.new(0, 350, 0, 120)
+        errorMsg.Position = UDim2.new(0.5, -175, 0.5, -60)
+        errorMsg.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+        errorMsg.Text = "NOT WHITELISTED\n\nUserID: " .. player.UserId .. "\n\nContact admin for access"
+        errorMsg.TextColor3 = Color3.fromRGB(255, 50, 50)
+        errorMsg.Font = Enum.Font.GothamBold
+        errorMsg.TextSize = 16
+        errorMsg.TextWrapped = true
+        errorMsg.ZIndex = 10000
+        
+        local errorCorner = Instance.new("UICorner", errorMsg)
+        errorCorner.CornerRadius = UDim.new(0, 12)
+        
+        local errorStroke = Instance.new("UIStroke", errorMsg)
+        errorStroke.Color = Color3.fromRGB(255, 50, 50)
+        errorStroke.Thickness = 2
+        
+        task.wait(5)
+        errorMsg:Destroy()
+    end
+end)
+
+-- ===========================================
+-- ANTI-AFK SYSTEM STARTUP CHECK
+-- ===========================================
+
+task.spawn(function()
+    task.wait(5)
+    
+    if Settings.autoFarm and Settings.antiAFK then
+        print("[ANTI-AFK] Auto Farm detected on script start. Starting anti-AFK system...")
+        startAntiAFKSystem()
+    end
+end)
+
+print("===========================================")
+print("DUALITY HUB PREMIUM LOADED SUCCESSFULLY!")
+print("Revamped GUI with enhanced visuals and tooltips.")
+print("Features:")
+print("- Auto Farm with Anti-Cheat Bypass")
+print("- Anti-AFK System (15 minute interval)")
+print("- Auto Sell & Auto Worm")
+print("- NoClip & Infinite Oxygen")
+print("- Multiple Zone Teleports")
+print("- Shop Auto Buy")
+print("===========================================")
